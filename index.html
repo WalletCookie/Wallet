@@ -771,13 +771,50 @@ function App() {
     };
   };
 
-  // 匯出 JSON
+  // 匯出 JSON(完整備份,可還原)
   const exportData = () => {
     const blob = new Blob([JSON.stringify(state, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = `記帳備份_${todayStr()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // 匯出 CSV(交易清單,給 Excel 看報表用)
+  const exportCSV = () => {
+    const rows = [];
+    // 表頭
+    rows.push(["日期", "類型", "主類別", "子類別", "帳戶", "金額", "備註", "分期編號"]);
+    // 依日期排序(新→舊)
+    const sorted = [...(state.transactions || [])].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    sorted.forEach(t => {
+      rows.push([
+        t.date || "",
+        t.type || "",
+        t.category || "",
+        t.subcategory || "",
+        t.account || "",
+        t.amount || 0,
+        t.note || "",
+        t.installmentGroupId || ""
+      ]);
+    });
+    // 轉成 CSV 字串(欄位含逗號/引號/換行時用雙引號包起來)
+    const csv = rows.map(row => row.map(cell => {
+      const s = String(cell ?? "");
+      if (s.includes(",") || s.includes("\"") || s.includes("\n")) {
+        return "\"" + s.replace(/"/g, "\"\"") + "\"";
+      }
+      return s;
+    }).join(",")).join("\n");
+    // 加 BOM,Excel 才能正確顯示中文
+    const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `記帳交易_${todayStr()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -810,7 +847,7 @@ function App() {
     addLedger, updateLedger, removeLedger, archiveLedger,
     addLedgerEntry, updateLedgerEntry, removeLedgerEntry,
     setMonthlyIncome, updateBudget,
-    exportData, importData,
+    exportData, exportCSV, importData,
     viewYear, setViewYear, viewMonth, setViewMonth
   };
 
@@ -4125,18 +4162,25 @@ function SettingsTab({ ctx }) {
       <div className="bg-white rounded-2xl shadow-sm p-4 mb-4">
         <h3 className="font-semibold mb-3">資料備份</h3>
         <p className="text-xs text-gray-500 mb-3">
-          目前資料存在瀏覽器本地。建議定期匯出備份。<br/>
-          要換裝置時,匯出 JSON → 在新裝置匯入即可。
+          目前資料存在瀏覽器本地,建議定期匯出備份。<br/>
+          <span className="text-blue-600">JSON</span>:完整備份 + 可還原(換裝置用)<br/>
+          <span className="text-orange-500">Excel/CSV</span>:交易清單,可用試算表打開看報表
         </p>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 gap-2 mb-2">
           <button
             onClick={ctx.exportData}
-            className="py-2 bg-blue-500 text-white rounded"
-          >匯出備份</button>
+            className="py-2 bg-blue-500 text-white rounded text-sm"
+          >匯出 JSON 備份</button>
+          <button
+            onClick={ctx.exportCSV}
+            className="py-2 bg-orange-500 text-white rounded text-sm"
+          >匯出 Excel(CSV)</button>
+        </div>
+        <div className="grid grid-cols-1 gap-2">
           <button
             onClick={() => fileRef.current.click()}
-            className="py-2 bg-green-500 text-white rounded"
-          >匯入備份</button>
+            className="py-2 bg-green-500 text-white rounded text-sm"
+          >匯入 JSON 備份(還原)</button>
           <input
             ref={fileRef}
             type="file"
