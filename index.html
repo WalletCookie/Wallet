@@ -3,12 +3,14 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>我的記帳本</title>
+<title>我的記帳本 v2.0</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
+  html { font-size: 19px; }
   html, body { font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; background: #f4f5f7; }
   .no-scrollbar::-webkit-scrollbar { display: none; }
   .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -20,7 +22,16 @@
 <body class="min-h-screen">
 <div id="root"></div>
 
-<script type="text/babel" data-presets="react">
+<script>
+  // 強制 Babel 使用 classic JSX runtime,避免在編譯結果塞入 import 語法
+  if (typeof Babel !== "undefined") {
+    Babel.registerPreset("react-classic", {
+      presets: [[Babel.availablePresets["react"], { runtime: "classic" }]]
+    });
+  }
+</script>
+
+<script type="text/babel" data-presets="react-classic">
 const { useState, useEffect, useMemo, useRef } = React;
 
 // ===================== 初始資料 =====================
@@ -721,14 +732,22 @@ function App() {
   const getAccountBalance = (acc) => {
     const opening = parseFloat(acc.openingBalance) || 0;
     if (acc.type === "信用卡") {
-      // 信用卡:本月(或本結帳週期)已使用金額
+      // 信用卡:本月已出帳 + 分期未來尚未扣款(銀行會預先佔用額度)
       const now = new Date();
       const thisMonth = now.toISOString().slice(0, 7);
+      // 本月最後一天 yyyy-mm-dd
+      const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
+      // 本月已使用(含本月份的分期期款)
       const used = state.transactions
         .filter(t => t.account === acc.name && t.date.startsWith(thisMonth) && t.type === "支出")
         .reduce((s, t) => s + t.amount, 0);
+      // 分期尚未扣:未來月份的分期交易(銀行仍佔用額度)
+      const pendingInstallments = state.transactions
+        .filter(t => t.account === acc.name && t.type === "支出" && t.installmentGroupId && t.date > lastDayOfMonth)
+        .reduce((s, t) => s + t.amount, 0);
       const limit = parseFloat(acc.creditLimit) || 0;
-      return { used, limit, remaining: limit - used, type: "credit" };
+      const occupied = used + pendingInstallments;
+      return { used, pendingInstallments, occupied, limit, remaining: limit - occupied, type: "credit" };
     }
     if (acc.type === "貸款") {
       // 貸款:顯示已還 / 總借款 / 剩餘
@@ -852,7 +871,7 @@ function App() {
   };
 
   return (
-    <div className="max-w-md mx-auto min-h-screen bg-gray-50 relative pb-24">
+    <div className="max-w-md md:max-w-2xl lg:max-w-3xl mx-auto min-h-screen bg-gray-50 relative pb-24">
       {tab === "add" && <AddTab ctx={ctx} />}
       {tab === "calendar" && <CalendarTab ctx={ctx} />}
       {tab === "ccreview" && <CCReviewTab ctx={ctx} />}
@@ -877,7 +896,7 @@ function BottomNav({ tab, setTab }) {
   ];
   return (
     <div className="fixed bottom-0 left-0 right-0 z-30">
-      <div className="max-w-md mx-auto bg-white border-t border-gray-200 flex safe-bottom">
+      <div className="max-w-md md:max-w-2xl lg:max-w-3xl mx-auto bg-white border-t border-gray-200 flex safe-bottom">
         {tabs.map(t => (
           <button
             key={t.key}
@@ -3474,13 +3493,19 @@ function AccountManager({ ctx }) {
                       {(() => {
                         const bal = ctx.getAccountBalance(a);
                         if (bal.type === "credit") {
-                          const pct = bal.limit > 0 ? Math.min(100, (bal.used / bal.limit) * 100) : 0;
+                          const pct = bal.limit > 0 ? Math.min(100, (bal.occupied / bal.limit) * 100) : 0;
                           return (
                             <div className="mt-2 pt-2 border-t border-gray-200">
                               <div className="flex justify-between text-xs">
                                 <span className="text-gray-500">本月已使用</span>
                                 <span className="font-semibold text-red-500">-{fmtMoney(bal.used)}</span>
                               </div>
+                              {bal.pendingInstallments > 0 && (
+                                <div className="flex justify-between text-xs mt-0.5">
+                                  <span className="text-gray-500">分期尚未扣</span>
+                                  <span className="font-semibold text-orange-500">-{fmtMoney(bal.pendingInstallments)}</span>
+                                </div>
+                              )}
                               {bal.limit > 0 && (
                                 <>
                                   <div className="flex justify-between text-xs mt-0.5">
@@ -4082,6 +4107,7 @@ function SettingsTab({ ctx }) {
   const [income, setIncome] = useState(ctx.state.budget.income);
   const [editBudget, setEditBudget] = useState(false);
   const [monthlyBudget, setMonthlyBudget] = useState(ctx.state.budget.monthlyBudget || "");
+  const [showSnapshot, setShowSnapshot] = useState(false);
   const fileRef = useRef();
 
   const saveIncome = () => {
@@ -4160,6 +4186,19 @@ function SettingsTab({ ctx }) {
       <AccountManager ctx={ctx} />
 
       <div className="bg-white rounded-2xl shadow-sm p-4 mb-4">
+        <h3 className="font-semibold mb-3">快照報表</h3>
+        <p className="text-xs text-gray-500 mb-3">
+          一鍵生成完整財務狀況畫面,含帳戶餘額、信用卡本期 / 分期、儲蓄目標、最近交易。<br/>
+          用手機/電腦截圖保存後,外出時隨時可看。<br/>
+          <span className="text-purple-600">各帳本的快照請到帳本頁面內點「分享」。</span>
+        </p>
+        <button
+          onClick={() => setShowSnapshot(true)}
+          className="w-full py-2.5 bg-purple-500 text-white rounded font-semibold text-sm"
+        >📸 生成帳本快照</button>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow-sm p-4 mb-4">
         <h3 className="font-semibold mb-3">資料備份</h3>
         <p className="text-xs text-gray-500 mb-3">
           目前資料存在瀏覽器本地,建議定期匯出備份。<br/>
@@ -4225,6 +4264,8 @@ function SettingsTab({ ctx }) {
         <div>儲蓄目標:{ctx.state.goals.length} 個</div>
         <div>帳戶數:{ctx.state.accounts.length}</div>
       </div>
+
+      {showSnapshot && <SnapshotReport ctx={ctx} onClose={() => setShowSnapshot(false)} />}
     </div>
   );
 }
@@ -4408,17 +4449,24 @@ function LedgerCard({ ctx, ledger, onOpen }) {
 }
 
 function LedgerDetailView({ ctx, ledger, onBack }) {
+  const [showSnap, setShowSnap] = useState(false);
   return (
     <div className="p-4">
       <div className="flex items-center gap-2 mb-3">
         <button onClick={onBack} className="text-blue-500 text-sm">‹ 返回</button>
-        <h1 className="text-xl font-bold text-gray-800 flex-1">
+        <h1 className="text-xl font-bold text-gray-800 flex-1 truncate">
           {ledger.icon} {ledger.name}
         </h1>
+        <button
+          onClick={() => setShowSnap(true)}
+          className="text-xs px-3 py-1.5 bg-purple-500 text-white rounded-full font-semibold whitespace-nowrap"
+          title="生成此帳本的快照圖片,可傳送給他人"
+        >📸 分享快照</button>
       </div>
       {ledger.type === "general" && <GeneralLedger ctx={ctx} ledger={ledger} />}
       {ledger.type === "utility" && <UtilityLedger ctx={ctx} ledger={ledger} />}
       {ledger.type === "subsidy" && <SubsidyLedger ctx={ctx} ledger={ledger} />}
+      {showSnap && <LedgerSnapshot ctx={ctx} ledger={ledger} onClose={() => setShowSnap(false)} />}
     </div>
   );
 }
@@ -5204,6 +5252,759 @@ function EditTxModal({ tx, ctx, onClose }) {
         <div className="flex gap-2">
           <button onClick={onClose} className="flex-1 py-2.5 bg-gray-200 text-gray-700 rounded-lg">取消</button>
           <button onClick={save} className="flex-1 py-2.5 bg-blue-500 text-white font-semibold rounded-lg">儲存</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===================== 帳本快照(截圖報表) =====================
+function SnapshotReport({ ctx, onClose }) {
+  const state = ctx.state;
+  const [downloading, setDownloading] = useState(false);
+  const now = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  const timestamp = `${now.getFullYear()}/${pad(now.getMonth()+1)}/${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const fileStamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+
+  // 收件信箱(預設妳的 Gmail,第一次會記住設定過的)
+  const defaultEmail = "joycehsu9146@gmail.com";
+  const savedEmail = (typeof localStorage !== "undefined" && localStorage.getItem("snapshot-email")) || defaultEmail;
+
+  const captureCanvas = async () => {
+    const el = document.getElementById("snapshot-content");
+    if (!el) throw new Error("找不到報表內容");
+    if (typeof html2canvas === "undefined") throw new Error("圖片功能未載入,請確認網路連線");
+    return await html2canvas(el, {
+      backgroundColor: "#f3f4f6",
+      scale: 2,
+      useCORS: true,
+      logging: false,
+      windowWidth: el.scrollWidth,
+      windowHeight: el.scrollHeight
+    });
+  };
+
+  const canvasToBlob = (canvas) => new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+
+  const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const tryClipboardCopy = async (blob) => {
+    if (!navigator.clipboard || !window.ClipboardItem) return false;
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const handleDownload = async () => {
+    setDownloading(true);
+    try {
+      const canvas = await captureCanvas();
+      const blob = await canvasToBlob(canvas);
+      downloadBlob(blob, `帳本快照_${fileStamp}.png`);
+    } catch (err) {
+      alert("下載失敗:" + err.message);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const handleEmail = async () => {
+    setDownloading(true);
+    try {
+      const canvas = await captureCanvas();
+      const blob = await canvasToBlob(canvas);
+
+      // 1. 先自動下載一份(避免剪貼簿失敗時沒圖可附加)
+      downloadBlob(blob, `帳本快照_${fileStamp}.png`);
+
+      // 2. 嘗試複製到剪貼簿(可以直接 Ctrl+V 貼進 Gmail)
+      const clipboardOK = await tryClipboardCopy(blob);
+
+      // 3. 組信件摘要
+      const summary = [
+        `📸 帳本快照  ${timestamp}`,
+        ``,
+        `💰 淨資產  ${fmtMoney(netWorth)}`,
+        `   總資產 ${fmtMoney(totalAssets)}  /  信用卡本期 ${fmtMoney(totalCCUsed)}  /  分期待扣 ${fmtMoney(totalCCPending)}`,
+        ``,
+        `📊 本月 (${now.getMonth()+1}月)`,
+        `   收入 ${fmtMoney(monthIncome)}  /  支出 ${fmtMoney(monthExpense)}  /  結餘 ${monthNet >= 0 ? "+" : ""}${fmtMoney(monthNet)}`,
+        ``,
+        `────────────────────────`,
+        clipboardOK
+          ? `圖片已複製到剪貼簿,請在信件內容區按 Ctrl+V 貼上`
+          : `圖片已下載到「下載」資料夾,請從下載資料夾把 PNG 拖進信件附件`,
+        `完整報表請看下方圖片`
+      ].join("\n");
+
+      const subject = `帳本快照 ${timestamp}`;
+      // 用 Gmail 網頁版的 compose URL,會在新分頁直接開啟寫信介面
+      const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(savedEmail)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(summary)}`;
+      window.open(gmailUrl, "_blank");
+
+      // 提示使用者下一步
+      setTimeout(() => {
+        alert(
+          clipboardOK
+            ? "✅ 已開啟 Gmail 寫信視窗\n\n請在信件內容區按 Ctrl+V 貼上圖片,再按「傳送」"
+            : "✅ 已開啟 Gmail 寫信視窗\n已下載 PNG 到「下載」資料夾\n\n請把該圖片拖進信件當附件,再按「傳送」"
+        );
+      }, 500);
+    } catch (err) {
+      alert("寄信失敗:" + err.message);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const changeEmail = () => {
+    const newEmail = prompt("要寄到哪個信箱?", savedEmail);
+    if (newEmail && newEmail.includes("@")) {
+      try { localStorage.setItem("snapshot-email", newEmail); } catch (e) {}
+      alert(`已改為寄到 ${newEmail}`);
+    }
+  };
+  const thisMonth = now.toISOString().slice(0, 7);
+
+  // 帳戶分組
+  const accountsByType = {};
+  (state.accounts || []).forEach(a => {
+    if (!accountsByType[a.type]) accountsByType[a.type] = [];
+    accountsByType[a.type].push(a);
+  });
+
+  // 總資產:儲值型帳戶(非信用卡、非貸款)的餘額加總
+  let totalAssets = 0;
+  (state.accounts || []).forEach(a => {
+    if (a.type === "信用卡" || a.type === "貸款") return;
+    const b = ctx.getAccountBalance(a);
+    totalAssets += (b.balance || 0);
+  });
+
+  // 信用卡本期 + 分期未來未扣
+  let totalCCUsed = 0;
+  let totalCCPending = 0;
+  const ccAccounts = (state.accounts || []).filter(a => a.type === "信用卡");
+  ccAccounts.forEach(a => {
+    const b = ctx.getAccountBalance(a);
+    totalCCUsed += (b.used || 0);
+    totalCCPending += (b.pendingInstallments || 0);
+  });
+  const totalCCOccupied = totalCCUsed + totalCCPending;
+  const netWorth = totalAssets - totalCCOccupied;
+
+  // 本月收支
+  const monthTxs = (state.transactions || []).filter(t => t.date && t.date.startsWith(thisMonth));
+  const monthIncome = monthTxs.filter(t => t.type === "收入").reduce((s,t) => s + t.amount, 0);
+  const monthExpense = monthTxs.filter(t => t.type === "支出").reduce((s,t) => s + t.amount, 0);
+  const monthNet = monthIncome - monthExpense;
+
+  // 儲蓄目標
+  const goals = state.goals || [];
+
+  // 最近 5 筆(排除轉帳,比較有意義)
+  const recentTxs = [...(state.transactions || [])]
+    .filter(t => t.type === "收入" || t.type === "支出")
+    .sort((a,b) => (b.date || "").localeCompare(a.date || ""))
+    .slice(0, 5);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-gray-100 overflow-y-auto">
+      <div className="max-w-md md:max-w-2xl lg:max-w-3xl mx-auto">
+        {/* 頂部工具列(擷取時不會拍到這裡) */}
+        <div className="sticky top-0 z-10 bg-gray-100/95 backdrop-blur p-3 border-b border-gray-200">
+          <div className="flex justify-between items-center mb-2">
+            <div className="text-sm text-gray-600">📸 帳本快照</div>
+            <button
+              onClick={onClose}
+              className="text-xs bg-gray-300 text-gray-700 px-3 py-1.5 rounded-full"
+            >關閉</button>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={handleEmail}
+              disabled={downloading}
+              className={`text-xs text-white px-3 py-2 rounded-full font-semibold ${downloading ? "bg-gray-400" : "bg-blue-500"}`}
+            >{downloading ? "產生中..." : "📧 寄到信箱"}</button>
+            <button
+              onClick={handleDownload}
+              disabled={downloading}
+              className={`text-xs text-white px-3 py-2 rounded-full font-semibold ${downloading ? "bg-gray-400" : "bg-green-600"}`}
+            >{downloading ? "產生中..." : "📥 只下載圖片"}</button>
+          </div>
+          <div className="flex justify-end items-center mt-1.5">
+            <button
+              onClick={changeEmail}
+              className="text-[10px] text-gray-500 underline"
+            >寄件信箱:{savedEmail} (點選更改)</button>
+          </div>
+        </div>
+
+        <div id="snapshot-content" className="p-4">
+          {/* 標題 + 時間 */}
+          <div className="text-center mb-4">
+            <div className="text-xl font-bold text-gray-800">💰 我的記帳本快照</div>
+            <div className="text-xs text-gray-500 mt-1">{timestamp}</div>
+          </div>
+
+          {/* 資產總覽 */}
+          <div className="bg-gradient-to-br from-blue-500 to-indigo-600 text-white rounded-2xl p-4 mb-3 shadow">
+            <div className="text-xs opacity-80 mb-1">淨資產(總資產 − 信用卡佔用)</div>
+            <div className="text-3xl font-bold mb-3">{fmtMoney(netWorth)}</div>
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="bg-white/15 rounded p-2">
+                <div className="opacity-80">總資產</div>
+                <div className="font-bold text-sm mt-0.5">{fmtMoney(totalAssets)}</div>
+              </div>
+              <div className="bg-white/15 rounded p-2">
+                <div className="opacity-80">本期未繳</div>
+                <div className="font-bold text-sm mt-0.5">{fmtMoney(totalCCUsed)}</div>
+              </div>
+              <div className="bg-white/15 rounded p-2">
+                <div className="opacity-80">分期待扣</div>
+                <div className="font-bold text-sm mt-0.5">{fmtMoney(totalCCPending)}</div>
+              </div>
+            </div>
+          </div>
+
+          {/* 本月收支 */}
+          <div className="bg-white rounded-2xl p-4 mb-3 shadow-sm">
+            <h3 className="font-semibold text-sm mb-3">📊 本月 ({now.getMonth()+1}月)</h3>
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div>
+                <div className="text-[10px] text-gray-500">收入</div>
+                <div className="text-base font-bold text-green-600 mt-0.5">{fmtMoney(monthIncome)}</div>
+              </div>
+              <div>
+                <div className="text-[10px] text-gray-500">支出</div>
+                <div className="text-base font-bold text-red-500 mt-0.5">{fmtMoney(monthExpense)}</div>
+              </div>
+              <div>
+                <div className="text-[10px] text-gray-500">結餘</div>
+                <div className={`text-base font-bold mt-0.5 ${monthNet >= 0 ? "text-blue-600" : "text-red-500"}`}>
+                  {monthNet >= 0 ? "+" : ""}{fmtMoney(monthNet)}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 帳戶餘額 */}
+          <div className="bg-white rounded-2xl p-4 mb-3 shadow-sm">
+            <h3 className="font-semibold text-sm mb-3">💵 帳戶餘額</h3>
+            {Object.entries(accountsByType).length === 0 && (
+              <div className="text-xs text-gray-400 text-center py-2">尚未建立帳戶</div>
+            )}
+            {Object.entries(accountsByType).map(([type, accs]) => (
+              <div key={type} className="mb-3 last:mb-0">
+                <div className="text-[11px] text-gray-500 mb-1 font-medium">
+                  {(ACCOUNT_TYPE_ICON && ACCOUNT_TYPE_ICON[type]) || "📦"} {type}
+                </div>
+                {accs.map(a => {
+                  const bal = ctx.getAccountBalance(a);
+                  if (bal.type === "credit") {
+                    return (
+                      <div key={a.id} className="py-1.5 border-b border-gray-50 last:border-0">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="font-medium">{a.name}</span>
+                          <span className="text-gray-500">額度 {bal.limit > 0 ? fmtMoney(bal.limit) : "—"}</span>
+                        </div>
+                        <div className="flex justify-between text-[11px] text-gray-500 mt-0.5">
+                          <span>本期 <span className="text-red-500 font-semibold">{fmtMoney(bal.used)}</span></span>
+                          {bal.pendingInstallments > 0 && (
+                            <span>分期待扣 <span className="text-orange-500 font-semibold">{fmtMoney(bal.pendingInstallments)}</span></span>
+                          )}
+                          <span>可用 <span className="text-green-600 font-semibold">{fmtMoney(bal.remaining)}</span></span>
+                        </div>
+                      </div>
+                    );
+                  }
+                  if (bal.type === "loan") {
+                    return (
+                      <div key={a.id} className="py-1.5 border-b border-gray-50 last:border-0">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="font-medium">{a.name}</span>
+                          <span className="font-semibold text-red-600">剩 {fmtMoney(bal.remaining)}</span>
+                        </div>
+                        <div className="text-[11px] text-gray-500 mt-0.5">
+                          已還 {fmtMoney(bal.paid)} / 總額 {fmtMoney(bal.totalRepay)}
+                        </div>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div key={a.id} className="flex justify-between items-center py-1.5 text-xs border-b border-gray-50 last:border-0">
+                      <span className="font-medium">{a.name}</span>
+                      <span className={`font-semibold ${bal.balance >= 0 ? "text-gray-800" : "text-red-500"}`}>
+                        {fmtMoney(bal.balance)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+
+          {/* 儲蓄目標 */}
+          {goals.length > 0 && (
+            <div className="bg-white rounded-2xl p-4 mb-3 shadow-sm">
+              <h3 className="font-semibold text-sm mb-3">🎯 儲蓄目標</h3>
+              {goals.map(g => {
+                const isPiggy = g.mode === "piggy";
+                const pct = isPiggy ? null : (g.target > 0 ? Math.min(100, (g.current / g.target) * 100) : 0);
+                return (
+                  <div key={g.id} className="mb-2 last:mb-0">
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="font-medium">{g.name}{isPiggy && <span className="ml-1 text-[10px] text-gray-400">(存錢筒)</span>}</span>
+                      <span className="font-semibold">
+                        {fmtMoney(g.current)}
+                        {!isPiggy && <span className="text-gray-400"> / {fmtMoney(g.target)}</span>}
+                      </span>
+                    </div>
+                    {pct !== null && (
+                      <div className="w-full bg-gray-100 rounded-full h-1.5">
+                        <div className="bg-blue-500 h-1.5 rounded-full" style={{width: `${pct}%`}}></div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* 最近 5 筆 */}
+          {recentTxs.length > 0 && (
+            <div className="bg-white rounded-2xl p-4 mb-3 shadow-sm">
+              <h3 className="font-semibold text-sm mb-3">🕐 最近 5 筆</h3>
+              {recentTxs.map(t => (
+                <div key={t.id} className="flex justify-between items-start py-1.5 text-xs border-b border-gray-50 last:border-0">
+                  <div className="flex-1 mr-2">
+                    <div className="font-medium">{t.date} · {t.category}{t.subcategory ? "/" + t.subcategory : ""}</div>
+                    <div className="text-[10px] text-gray-500 mt-0.5">
+                      {t.account}{t.note ? " · " + t.note : ""}
+                    </div>
+                  </div>
+                  <div className={`font-semibold whitespace-nowrap ${t.type === "收入" ? "text-green-600" : "text-red-500"}`}>
+                    {t.type === "收入" ? "+" : "-"}{fmtMoney(t.amount)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 說明 */}
+          <div className="text-center text-[10px] text-gray-400 py-3">
+            按上方「📧 寄到信箱」→ Gmail 會自動開新信件 → 按 Ctrl+V 貼上圖片 → 送出
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===================== 單一帳本快照(截圖報表) =====================
+function LedgerSnapshot({ ctx, ledger, onClose }) {
+  const [downloading, setDownloading] = useState(false);
+  const now = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  const timestamp = `${now.getFullYear()}/${pad(now.getMonth()+1)}/${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const fileStamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+
+  // 每本帳本獨立的收件人(上次輸入過會記住,方便重複傳給同一人)
+  const emailKey = `ledger-snapshot-email-${ledger.id}`;
+  const savedEmail = (typeof localStorage !== "undefined" && localStorage.getItem(emailKey)) || "";
+
+  const captureCanvas = async () => {
+    const el = document.getElementById(`ledger-snapshot-${ledger.id}`);
+    if (!el) throw new Error("找不到報表內容");
+    if (typeof html2canvas === "undefined") throw new Error("圖片功能未載入,請確認網路連線");
+    return await html2canvas(el, {
+      backgroundColor: "#f3f4f6",
+      scale: 2,
+      useCORS: true,
+      logging: false,
+      windowWidth: el.scrollWidth,
+      windowHeight: el.scrollHeight
+    });
+  };
+
+  const canvasToBlob = (canvas) => new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+
+  const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const tryClipboardCopy = async (blob) => {
+    if (!navigator.clipboard || !window.ClipboardItem) return false;
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const safeName = (ledger.name || "帳本").replace(/[\\/:*?"<>|]/g, "_");
+
+  const handleDownload = async () => {
+    setDownloading(true);
+    try {
+      const canvas = await captureCanvas();
+      const blob = await canvasToBlob(canvas);
+      downloadBlob(blob, `${safeName}_快照_${fileStamp}.png`);
+    } catch (err) {
+      alert("下載失敗:" + err.message);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const handleCopy = async () => {
+    setDownloading(true);
+    try {
+      const canvas = await captureCanvas();
+      const blob = await canvasToBlob(canvas);
+      const ok = await tryClipboardCopy(blob);
+      if (ok) {
+        alert("✅ 圖片已複製到剪貼簿\n打開 LINE / IG / 郵件 / Messenger,按 Ctrl+V 貼上傳送即可");
+      } else {
+        downloadBlob(blob, `${safeName}_快照_${fileStamp}.png`);
+        alert("此瀏覽器不支援直接複製,已改下載到「下載」資料夾");
+      }
+    } catch (err) {
+      alert("複製失敗:" + err.message);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const handleEmail = async () => {
+    let recipient = savedEmail;
+    if (!recipient) {
+      recipient = prompt("要寄給誰?請輸入對方的 email", "") || "";
+    }
+    if (!recipient || !recipient.includes("@")) {
+      const retry = prompt("請輸入對方的 email", recipient);
+      if (!retry || !retry.includes("@")) { alert("沒有輸入有效的信箱,取消寄送"); return; }
+      recipient = retry;
+    }
+    try { localStorage.setItem(emailKey, recipient); } catch (e) {}
+
+    setDownloading(true);
+    try {
+      const canvas = await captureCanvas();
+      const blob = await canvasToBlob(canvas);
+
+      downloadBlob(blob, `${safeName}_快照_${fileStamp}.png`);
+      const clipboardOK = await tryClipboardCopy(blob);
+
+      const summaryLines = [`📒 ${ledger.name} 快照  ${timestamp}`, ``];
+      if (ledger.type === "general") {
+        summaryLines.push(`收入 ${fmtMoney(summary.income)}  支出 ${fmtMoney(summary.expense)}  結餘 ${fmtMoney(summary.income - summary.expense)}`);
+        summaryLines.push(`共 ${summary.count} 筆紀錄`);
+      } else if (ledger.type === "utility") {
+        summaryLines.push(`累計用量 ${summary.totalUsage.toFixed(1)} ${summary.unit}`);
+        summaryLines.push(`累計金額 ${fmtMoney(summary.totalAmount)}  平均 ${fmtMoney(summary.avg)}`);
+        summaryLines.push(`共 ${summary.count} 期紀錄`);
+      } else {
+        summaryLines.push(`累計 ${fmtMoney(summary.total)}  每月平均 ${fmtMoney(summary.avg)}`);
+        summaryLines.push(`共 ${summary.count} 筆紀錄`);
+      }
+      summaryLines.push(``);
+      summaryLines.push(`────────────────────────`);
+      summaryLines.push(clipboardOK
+        ? `圖片已複製到剪貼簿,請在信件內容區按 Ctrl+V 貼上`
+        : `圖片已下載到「下載」資料夾,請從下載資料夾拖進信件附件`);
+      summaryLines.push(`完整報表請看附件圖片`);
+      const summaryText = summaryLines.join("\n");
+
+      const subject = `${ledger.name} 快照 ${timestamp}`;
+      const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(recipient)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(summaryText)}`;
+      window.open(gmailUrl, "_blank");
+
+      setTimeout(() => {
+        alert(
+          clipboardOK
+            ? `✅ 已開啟 Gmail 寫信視窗(寄給 ${recipient})\n\n請在信件內容區按 Ctrl+V 貼上圖片,再按「傳送」`
+            : `✅ 已開啟 Gmail 寫信視窗(寄給 ${recipient})\n已下載 PNG 到「下載」資料夾\n\n請把該圖片拖進信件當附件,再按「傳送」`
+        );
+      }, 500);
+    } catch (err) {
+      alert("寄信失敗:" + err.message);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const changeEmail = () => {
+    const newEmail = prompt("預設收件人 email(留空=每次都臨時輸入)", savedEmail);
+    if (newEmail === null) return;
+    try { localStorage.setItem(emailKey, newEmail.trim()); } catch (e) {}
+    alert(newEmail.trim()
+      ? `已設定預設寄給 ${newEmail.trim()}`
+      : "已清空預設收件人,下次寄信時會請你輸入");
+  };
+
+  // ========== 計算資料 ==========
+  const entries = (ctx.state.ledgerEntries || []).filter(e => e.ledgerId === ledger.id);
+
+  let summary = { count: entries.length };
+  if (ledger.type === "general") {
+    summary.income = entries.filter(e => e.type === "收入").reduce((s,e) => s + (e.amount || 0), 0);
+    summary.expense = entries.filter(e => e.type === "支出").reduce((s,e) => s + (e.amount || 0), 0);
+  } else if (ledger.type === "utility") {
+    summary.totalUsage = entries.reduce((s,e) => s + (parseFloat(e.usage) || 0), 0);
+    summary.totalAmount = entries.reduce((s,e) => s + (parseFloat(e.amount) || 0), 0);
+    summary.avg = entries.length > 0 ? summary.totalAmount / entries.length : 0;
+    summary.unit = entries[0]?.unit || "度";
+  } else {
+    summary.total = entries.reduce((s,e) => s + (parseFloat(e.amount) || 0), 0);
+    summary.avg = entries.length > 0 ? summary.total / entries.length : 0;
+  }
+
+  // ========== 各類型內容區 ==========
+  const renderGeneral = () => {
+    const byMonth = {};
+    entries.forEach(e => {
+      const ym = (e.date || "").slice(0, 7) || "未分類";
+      if (!byMonth[ym]) byMonth[ym] = { income: 0, expense: 0, items: [] };
+      byMonth[ym].items.push(e);
+      if (e.type === "收入") byMonth[ym].income += (e.amount || 0);
+      else byMonth[ym].expense += (e.amount || 0);
+    });
+    const months = Object.keys(byMonth).sort().reverse();
+    return (
+      <>
+        <div className="bg-gradient-to-br from-purple-500 to-pink-500 text-white rounded-2xl p-4 mb-3 shadow">
+          <div className="text-xs opacity-80 mb-1">結餘</div>
+          <div className="text-3xl font-bold mb-3">{fmtMoney(summary.income - summary.expense)}</div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="bg-white/15 rounded p-2">
+              <div className="opacity-80">總收入</div>
+              <div className="font-bold text-sm mt-0.5">+{fmtMoney(summary.income)}</div>
+            </div>
+            <div className="bg-white/15 rounded p-2">
+              <div className="opacity-80">總支出</div>
+              <div className="font-bold text-sm mt-0.5">-{fmtMoney(summary.expense)}</div>
+            </div>
+          </div>
+        </div>
+
+        {months.length === 0 ? (
+          <div className="bg-white rounded-2xl p-4 text-center text-sm text-gray-400">尚無紀錄</div>
+        ) : months.map(ym => (
+          <div key={ym} className="bg-white rounded-2xl p-4 mb-3 shadow-sm">
+            <div className="flex justify-between items-center mb-2">
+              <h3 className="font-semibold text-sm">{ym}</h3>
+              <div className="text-xs">
+                <span className="text-green-600">+{fmtMoney(byMonth[ym].income)}</span>
+                <span className="text-gray-300 mx-1">|</span>
+                <span className="text-red-500">-{fmtMoney(byMonth[ym].expense)}</span>
+              </div>
+            </div>
+            <div className="space-y-1">
+              {byMonth[ym].items.sort((a,b) => (b.date || "").localeCompare(a.date || "")).map(e => (
+                <div key={e.id} className="flex justify-between items-start text-xs py-1 border-b border-gray-50 last:border-0">
+                  <div className="flex-1 min-w-0 mr-2">
+                    <div className="text-gray-500 text-[11px]">{e.date}</div>
+                    {e.note && <div className="truncate">{e.note}</div>}
+                  </div>
+                  <span className={`font-semibold whitespace-nowrap ${e.type === "支出" ? "text-red-500" : "text-green-500"}`}>
+                    {e.type === "支出" ? "-" : "+"}{fmtMoney(e.amount)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </>
+    );
+  };
+
+  const renderUtility = () => {
+    const sorted = [...entries].sort((a,b) => (b.year - a.year) || (b.month - a.month));
+    const unit = summary.unit;
+    return (
+      <>
+        <div className="bg-gradient-to-br from-cyan-500 to-blue-600 text-white rounded-2xl p-4 mb-3 shadow">
+          <div className="text-xs opacity-80 mb-1">累計金額</div>
+          <div className="text-3xl font-bold mb-3">{fmtMoney(summary.totalAmount)}</div>
+          <div className="grid grid-cols-3 gap-2 text-xs">
+            <div className="bg-white/15 rounded p-2">
+              <div className="opacity-80">累計用量</div>
+              <div className="font-bold text-sm mt-0.5">{summary.totalUsage.toFixed(1)} {unit}</div>
+            </div>
+            <div className="bg-white/15 rounded p-2">
+              <div className="opacity-80">每期平均</div>
+              <div className="font-bold text-sm mt-0.5">{fmtMoney(summary.avg)}</div>
+            </div>
+            <div className="bg-white/15 rounded p-2">
+              <div className="opacity-80">期數</div>
+              <div className="font-bold text-sm mt-0.5">{summary.count}</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl p-4 mb-3 shadow-sm">
+          <h3 className="font-semibold text-sm mb-3">📊 歷史紀錄</h3>
+          {sorted.length === 0 ? (
+            <div className="text-center text-gray-400 py-2 text-sm">尚無紀錄</div>
+          ) : (
+            <div className="space-y-2">
+              {sorted.map(e => {
+                const perUnit = e.usage > 0 ? e.amount / e.usage : 0;
+                const prev = entries.find(x => x.year === e.year - 1 && x.month === e.month);
+                const usageDiff = prev ? e.usage - prev.usage : null;
+                const amountDiff = prev ? e.amount - prev.amount : null;
+                return (
+                  <div key={e.id} className="p-2 bg-gray-50 rounded text-xs">
+                    <div className="flex justify-between items-start mb-1">
+                      <span className="font-semibold">{e.year}/{e.month}月</span>
+                      <span className="font-bold text-orange-600">{fmtMoney(e.amount)}</span>
+                    </div>
+                    <div className="text-[11px] text-gray-600">
+                      用量 {e.usage}{e.unit || unit} · 每{e.unit || unit} {fmtMoney(perUnit)}
+                      {e.persons > 0 && ` · ${e.persons}人 人均 ${fmtMoney(e.amount / e.persons)}`}
+                    </div>
+                    {e.periodStart && (
+                      <div className="text-[10px] text-gray-400 mt-0.5">
+                        {e.periodStart} ~ {e.periodEnd}
+                      </div>
+                    )}
+                    {prev && (
+                      <div className="text-[10px] mt-1">
+                        <span className="text-gray-400">vs {prev.year}/{prev.month}:</span>
+                        <span className={`ml-1 font-medium ${usageDiff > 0 ? "text-red-500" : "text-green-600"}`}>
+                          用量 {usageDiff > 0 ? "+" : ""}{usageDiff.toFixed(1)}{e.unit || unit}
+                        </span>
+                        <span className={`ml-2 font-medium ${amountDiff > 0 ? "text-red-500" : "text-green-600"}`}>
+                          金額 {amountDiff > 0 ? "+" : ""}{fmtMoney(amountDiff)}
+                        </span>
+                      </div>
+                    )}
+                    {e.note && <div className="text-[10px] text-gray-500 mt-0.5">備註:{e.note}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </>
+    );
+  };
+
+  const renderSubsidy = () => {
+    const sorted = [...entries].sort((a,b) => (b.ym || "").localeCompare(a.ym || ""));
+    return (
+      <>
+        <div className="bg-gradient-to-br from-emerald-500 to-teal-600 text-white rounded-2xl p-4 mb-3 shadow">
+          <div className="text-xs opacity-80 mb-1">累計金額</div>
+          <div className="text-3xl font-bold mb-3">{fmtMoney(summary.total)}</div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="bg-white/15 rounded p-2">
+              <div className="opacity-80">每月平均</div>
+              <div className="font-bold text-sm mt-0.5">{fmtMoney(summary.avg)}</div>
+            </div>
+            <div className="bg-white/15 rounded p-2">
+              <div className="opacity-80">筆數</div>
+              <div className="font-bold text-sm mt-0.5">{summary.count}</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl p-4 mb-3 shadow-sm">
+          <h3 className="font-semibold text-sm mb-3">📋 全部紀錄</h3>
+          {sorted.length === 0 ? (
+            <div className="text-center text-gray-400 py-2 text-sm">尚無紀錄</div>
+          ) : (
+            <div className="space-y-1">
+              {sorted.map(e => (
+                <div key={e.id} className="flex justify-between items-start text-xs py-1.5 border-b border-gray-50 last:border-0">
+                  <div className="flex-1 min-w-0 mr-2">
+                    <div className="font-semibold">{e.ym}</div>
+                    <div className="text-[10px] text-gray-500">日期:{e.date}</div>
+                    {e.note && <div className="text-[10px] text-gray-400 truncate">{e.note}</div>}
+                  </div>
+                  <span className="font-bold text-emerald-600 whitespace-nowrap">{fmtMoney(e.amount)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </>
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-gray-100 overflow-y-auto">
+      <div className="max-w-md md:max-w-2xl lg:max-w-3xl mx-auto">
+        {/* 頂部工具列(擷取時不會拍到這裡) */}
+        <div className="sticky top-0 z-10 bg-gray-100/95 backdrop-blur p-3 border-b border-gray-200">
+          <div className="flex justify-between items-center mb-2">
+            <div className="text-sm text-gray-600 truncate">📸 {ledger.name} 快照</div>
+            <button
+              onClick={onClose}
+              className="text-xs bg-gray-300 text-gray-700 px-3 py-1.5 rounded-full flex-shrink-0 ml-2"
+            >關閉</button>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              onClick={handleEmail}
+              disabled={downloading}
+              className={`text-xs text-white px-2 py-2 rounded-full font-semibold ${downloading ? "bg-gray-400" : "bg-blue-500"}`}
+            >{downloading ? "處理中..." : "📧 寄信"}</button>
+            <button
+              onClick={handleCopy}
+              disabled={downloading}
+              className={`text-xs text-white px-2 py-2 rounded-full font-semibold ${downloading ? "bg-gray-400" : "bg-purple-500"}`}
+            >{downloading ? "處理中..." : "📋 複製圖片"}</button>
+            <button
+              onClick={handleDownload}
+              disabled={downloading}
+              className={`text-xs text-white px-2 py-2 rounded-full font-semibold ${downloading ? "bg-gray-400" : "bg-green-600"}`}
+            >{downloading ? "處理中..." : "📥 下載"}</button>
+          </div>
+          <div className="flex justify-end items-center mt-1.5">
+            <button
+              onClick={changeEmail}
+              className="text-[10px] text-gray-500 underline"
+            >預設收件人:{savedEmail || "(每次臨時輸入)"} (點選設定)</button>
+          </div>
+        </div>
+
+        <div id={`ledger-snapshot-${ledger.id}`} className="p-4">
+          {/* 標題 + 時間 */}
+          <div className="text-center mb-4">
+            <div className="text-xl font-bold text-gray-800">{ledger.icon || "📒"} {ledger.name}</div>
+            <div className="text-xs text-gray-500 mt-1">{timestamp}</div>
+          </div>
+
+          {ledger.type === "general" && renderGeneral()}
+          {ledger.type === "utility" && renderUtility()}
+          {ledger.type === "subsidy" && renderSubsidy()}
+
+          <div className="text-center text-[10px] text-gray-400 py-3">
+            由「我的記帳本」生成
+          </div>
         </div>
       </div>
     </div>
