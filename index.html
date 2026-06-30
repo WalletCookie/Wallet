@@ -677,7 +677,7 @@ function App() {
         name: ledger.name,
         type: ledger.type || "general",
         icon: ledger.icon || "📒",
-        color: ledger.color || "bg-emerald-100 text-emerald-700",
+        color: ledger.color || "#6ee7b7",
         archived: false,
         createdAt: todayStr(),
         ...ledger
@@ -4432,13 +4432,13 @@ function LedgersTab({ ctx }) {
   const [showAdd, setShowAdd] = useState(false);
   const [openLedgerId, setOpenLedgerId] = useState(null);
   const [showArchived, setShowArchived] = useState(false);
-  const [form, setForm] = useState({ name: "", type: "general", icon: "📒", color: "bg-emerald-100 text-emerald-700" });
+  const [form, setForm] = useState({ name: "", type: "general", icon: "📒", color: "#6ee7b7" });
 
   const handleAdd = () => {
     if (!form.name.trim()) { alert("請輸入帳本名稱"); return; }
     const icon = form.icon || LEDGER_TYPE_META[form.type].icon;
     ctx.addLedger({ name: form.name.trim(), type: form.type, icon, color: form.color });
-    setForm({ name: "", type: "general", icon: "📒", color: "bg-emerald-100 text-emerald-700" });
+    setForm({ name: "", type: "general", icon: "📒", color: "#6ee7b7" });
     setShowAdd(false);
   };
 
@@ -4498,14 +4498,19 @@ function LedgersTab({ ctx }) {
             </div>
             <div>
               <div className="text-xs text-gray-500 mb-1">顏色</div>
-              <div className="grid grid-cols-6 gap-1">
-                {CATEGORY_COLORS.map(co => (
-                  <button
-                    key={co.value}
-                    onClick={() => setForm({...form, color: co.value})}
-                    className={`py-1 px-1 rounded text-[11px] ${co.value} ${form.color === co.value ? "ring-2 ring-offset-1 ring-blue-400" : ""}`}
-                  >{co.label}</button>
-                ))}
+              <div className="flex items-center gap-3">
+                <input
+                  type="color"
+                  value={form.color}
+                  onChange={e => setForm({...form, color: e.target.value})}
+                  className="w-10 h-10 rounded-lg cursor-pointer border border-gray-200 p-0.5"
+                />
+                <div
+                  className="flex-1 rounded-lg p-2 text-sm text-center font-medium"
+                  style={{backgroundColor: form.color + "30", border: `2px solid ${form.color}`}}
+                >
+                  {form.icon} {form.name || "帳本預覽"}
+                </div>
               </div>
             </div>
             <button onClick={handleAdd} className="w-full py-2 bg-blue-500 text-white rounded text-sm">建立帳本</button>
@@ -4563,7 +4568,7 @@ function LedgerCard({ ctx, ledger, onOpen }) {
   }
 
   return (
-    <div className={`rounded-lg p-3 flex items-center justify-between ${ledger.color || "bg-gray-100"} ${ledger.archived ? "opacity-60" : ""}`}>
+    <div className={`rounded-lg p-3 flex items-center justify-between ${ledger.archived ? "opacity-60" : ""}`} style={{backgroundColor: ledger.color ? ledger.color + "30" : "#f3f4f6", borderLeft: ledger.color ? `3px solid ${ledger.color}` : "none"}}>
       <button onClick={onOpen} className="flex-1 text-left">
         <div className="font-semibold">
           {ledger.icon || "📒"} {ledger.name}
