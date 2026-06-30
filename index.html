@@ -10,7 +10,7 @@
 <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
-  html { font-size: 19px; }
+  html { font-size: 15px; }
   html, body { font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; background: #f4f5f7; }
   .no-scrollbar::-webkit-scrollbar { display: none; }
   .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -468,7 +468,6 @@ function App() {
       const cur = s.accounts.find(a => a.id === id);
       if (!cur) return s;
       const next = { ...cur, ...updates };
-      // 若為貸款且還款資訊變動 → 重新生成該貸款交易
       let nextTxs = s.transactions;
       if (next.type === "貸款") {
         const keyChanged = (
@@ -486,7 +485,6 @@ function App() {
           next.loanGroupId = groupId;
         }
       }
-      // 帳戶改名 → 同步所有交易、目標、固定支出
       const nameChanged = cur.name !== next.name;
       if (nameChanged) {
         nextTxs = nextTxs.map(t => {
@@ -1356,11 +1354,11 @@ function AddTab({ ctx }) {
                   placeholder={`新增「${category}」的子分類`}
                   value={newSub}
                   onChange={e => setNewSub(e.target.value)}
-                  className="flex-1 p-2 border border-gray-200 rounded text-sm"
+                  className="flex-1 min-w-0 p-2 border border-gray-200 rounded text-sm"
                 />
                 <button
                   onClick={() => { ctx.addSubcategory(category, newSub); setNewSub(""); setShowAddSub(false); }}
-                  className="px-3 bg-blue-500 text-white rounded text-sm"
+                  className="flex-shrink-0 px-3 bg-blue-500 text-white rounded text-sm"
                 >新增</button>
               </div>
             )}
@@ -1663,11 +1661,11 @@ function CalendarTab({ ctx }) {
             placeholder="🔍 搜尋備註、子分類..."
             value={search}
             onChange={e => setSearch(e.target.value)}
-            className="flex-1 p-2 border border-gray-200 rounded-lg text-sm"
+            className="flex-1 min-w-0 p-2 border border-gray-200 rounded-lg text-sm"
           />
           <button
             onClick={() => setShowFilter(!showFilter)}
-            className={`px-3 rounded-lg text-sm ${showFilter ? "bg-blue-500 text-white" : "bg-gray-100 text-gray-700"}`}
+            className={`flex-shrink-0 px-3 rounded-lg text-sm ${showFilter ? "bg-blue-500 text-white" : "bg-gray-100 text-gray-700"}`}
           >篩選{(filterCategory !== "全部" || typeFilter !== "全部" || accountFilter !== "全部") && " •"}</button>
         </div>
 
@@ -4254,16 +4252,18 @@ function SettingsTab({ ctx }) {
           )}
         </div>
         {editIncome ? (
-          <div className="flex gap-2">
+          <div className="space-y-2">
             <input
               type="number"
               value={income}
               onChange={e => setIncome(e.target.value)}
-              className="flex-1 p-2 border border-gray-200 rounded"
+              className="w-full p-2 border border-gray-200 rounded"
               autoFocus
             />
-            <button onClick={saveIncome} className="px-4 bg-blue-500 text-white rounded">儲存</button>
-            <button onClick={() => { setIncome(ctx.state.budget.income); setEditIncome(false); }} className="px-3 bg-gray-200 rounded">取消</button>
+            <div className="flex gap-2">
+              <button onClick={saveIncome} className="flex-1 py-2 bg-blue-500 text-white rounded text-sm">儲存</button>
+              <button onClick={() => { setIncome(ctx.state.budget.income); setEditIncome(false); }} className="flex-1 py-2 bg-gray-200 rounded text-sm">取消</button>
+            </div>
           </div>
         ) : (
           <div className="text-2xl font-bold text-green-600">{fmtMoney(ctx.state.budget.income)}</div>
@@ -4284,17 +4284,19 @@ function SettingsTab({ ctx }) {
           例如:預算 $10,000,這個月信用卡刷了 $5,000,那還能刷 = $10,000 − $5,000 = $5,000
         </div>
         {editBudget ? (
-          <div className="flex gap-2">
+          <div className="space-y-2">
             <input
               type="number"
               placeholder="例如 15000"
               value={monthlyBudget}
               onChange={e => setMonthlyBudget(e.target.value)}
-              className="flex-1 p-2 border border-gray-200 rounded"
+              className="w-full p-2 border border-gray-200 rounded"
               autoFocus
             />
-            <button onClick={saveBudget} className="px-4 bg-blue-500 text-white rounded">儲存</button>
-            <button onClick={() => { setMonthlyBudget(ctx.state.budget.monthlyBudget || ""); setEditBudget(false); }} className="px-3 bg-gray-200 rounded">取消</button>
+            <div className="flex gap-2">
+              <button onClick={saveBudget} className="flex-1 py-2 bg-blue-500 text-white rounded text-sm">儲存</button>
+              <button onClick={() => { setMonthlyBudget(ctx.state.budget.monthlyBudget || ""); setEditBudget(false); }} className="flex-1 py-2 bg-gray-200 rounded text-sm">取消</button>
+            </div>
           </div>
         ) : (
           <div className="text-2xl font-bold text-orange-600">
