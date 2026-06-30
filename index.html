@@ -92,12 +92,7 @@ const ACCOUNT_TYPE_LABEL = new Proxy({}, {
 });
 rebuildAccountTypes(null);
 
-const DEFAULT_ACCOUNTS = [
-  { id: "a1", name: "台新銀行信用卡", type: "信用卡", last4: "", expire: "", statementDay: "", dueDay: "", creditLimit: "", benefits: "", annualFee: "", openingBalance: 0, note: "" },
-  { id: "a2", name: "聯邦銀行信用卡", type: "信用卡", last4: "", expire: "", statementDay: "", dueDay: "", creditLimit: "", benefits: "", annualFee: "", openingBalance: 0, note: "" },
-  { id: "a3", name: "現金", type: "現金", openingBalance: 0, note: "" },
-  { id: "a4", name: "其他", type: "其他", openingBalance: 0, note: "" }
-];
+const DEFAULT_ACCOUNTS = [];
 
 const DEFAULT_FIXED_EXPENSES = [];
 
@@ -150,17 +145,9 @@ const buildMergedCT = (state) => {
   return merged;
 };
 
-const DEFAULT_GOALS = [
-  { id: "g1", name: "總儲蓄(目標10萬)", target: 100000, current: 0, note: "SNY 主要存款" },
-  { id: "g2", name: "旅遊基金", target: 20000, current: 0, note: "" },
-  { id: "g3", name: "緊急預備金", target: 50000, current: 0, note: "" }
-];
+const DEFAULT_GOALS = [];
 
-const DEFAULT_BUDGET = {
-  income: 35000,
-  fixed: { 信用卡: 4335, 信貸: 5015, 固定房貸: 5000, 固定生活費: 3000, 固定交通費: 969 },
-  savings: { 儲蓄: 4000, 旅費: 5000, 家庭支備金: 1000, 雜支預備: 1000, 學貸預備: 1000 }
-};
+const DEFAULT_BUDGET = { income: 0, monthlyBudget: 0 };
 
 // ===================== localStorage helpers =====================
 const LS_KEY = "joyce-money-app-v1";
@@ -173,8 +160,14 @@ const loadState = () => {
   } catch (e) { return null; }
 };
 
+let __saveWarnShown = false;
 const saveState = (state) => {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) {}
+  try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) {
+    if (!__saveWarnShown) {
+      __saveWarnShown = true;
+      alert("⚠️ 儲存失敗！可能是瀏覽器儲存空間不足。\n請立即到「設定 → 匯出 JSON 備份」以免資料遺失。");
+    }
+  }
 };
 
 const todayStr = () => {
@@ -207,14 +200,14 @@ function App() {
     if (!saved) {
       return {
         transactions: [],
-        installments: [],
         goals: DEFAULT_GOALS,
         accounts: DEFAULT_ACCOUNTS,
         stocks: [],
         budget: DEFAULT_BUDGET,
         monthlyIncomes: {},
         fixedExpenses: DEFAULT_FIXED_EXPENSES,
-        customSubcategories: {}
+        customSubcategories: {},
+        ccBillAmounts: {}
       };
     }
     // 資料遷移:舊版帳戶是字串陣列,轉為物件
@@ -244,6 +237,7 @@ function App() {
     if (!saved.ledgerEntries) saved.ledgerEntries = [];
     if (!saved.customAccountTypes) saved.customAccountTypes = [];
     if (!saved.hiddenAccountTypes) saved.hiddenAccountTypes = [];
+    if (!saved.ccBillAmounts) saved.ccBillAmounts = {};
     return saved;
   });
 
@@ -474,8 +468,7 @@ function App() {
       const cur = s.accounts.find(a => a.id === id);
       if (!cur) return s;
       const next = { ...cur, ...updates };
-      let transactions = s.accounts;
-      // 若為貸款且還款資訊變動 → 重新生成該貸款交易(保留已手動新增的其他支出)
+      // 若為貸款且還款資訊變動 → 重新生成該貸款交易
       let nextTxs = s.transactions;
       if (next.type === "貸款") {
         const keyChanged = (
@@ -487,29 +480,44 @@ function App() {
         );
         if (keyChanged) {
           const groupId = next.loanGroupId || cur.loanGroupId || ("loan-" + id);
-          // 移除舊的貸款分期交易
           nextTxs = s.transactions.filter(t => t.installmentGroupId !== groupId);
           const regen = generateLoanTransactions({ ...next, id, loanGroupId: groupId });
           nextTxs = [...nextTxs, ...regen];
           next.loanGroupId = groupId;
         }
       }
+      // 帳戶改名 → 同步所有交易、目標、固定支出
+      const nameChanged = cur.name !== next.name;
+      if (nameChanged) {
+        nextTxs = nextTxs.map(t => {
+          const u = { ...t };
+          if (u.account === cur.name) u.account = next.name;
+          if (u.fromAccount === cur.name) u.fromAccount = next.name;
+          if (u.toAccount === cur.name) u.toAccount = next.name;
+          return u;
+        });
+      }
       return {
         ...s,
         accounts: s.accounts.map(a => a.id === id ? next : a),
-        transactions: nextTxs
+        transactions: nextTxs,
+        goals: nameChanged ? s.goals.map(g => g.accountName === cur.name ? { ...g, accountName: next.name } : g) : s.goals,
+        goalEntries: nameChanged ? (s.goalEntries || []).map(e => e.accountName === cur.name ? { ...e, accountName: next.name } : e) : (s.goalEntries || []),
+        fixedExpenses: nameChanged ? (s.fixedExpenses || []).map(f => f.matchType === "account" && f.matchValue === cur.name ? { ...f, matchValue: next.name } : f) : (s.fixedExpenses || [])
       };
     });
   };
 
   const removeAccount = (id) => {
+    const acc = state.accounts.find(a => a.id === id);
+    let deleteLoanTxs = false;
+    if (acc && acc.type === "貸款" && acc.loanGroupId) {
+      deleteLoanTxs = confirm(`要同時刪除「${acc.name}」自動產生的每月扣款紀錄嗎?\n(按「取消」則保留已產生的交易)`);
+    }
     setState(s => {
-      const acc = s.accounts.find(a => a.id === id);
-      let nextTxs = s.transactions;
-      if (acc && acc.type === "貸款" && acc.loanGroupId) {
-        const keep = confirm(`要同時刪除「${acc.name}」自動產生的每月扣款紀錄嗎?\n(按「取消」則保留已產生的交易)`);
-        if (keep) nextTxs = s.transactions.filter(t => t.installmentGroupId !== acc.loanGroupId);
-      }
+      let nextTxs = deleteLoanTxs
+        ? s.transactions.filter(t => t.installmentGroupId !== acc.loanGroupId)
+        : s.transactions;
       return {
         ...s,
         accounts: s.accounts.filter(a => a.id !== id),
@@ -537,6 +545,14 @@ function App() {
     setState(s => ({ ...s, monthlyIncomes: { ...s.monthlyIncomes, [ym]: amount } }));
   };
 
+  const setCCBillAmount = (ym, cardId, amount) => {
+    const key = `${ym}_${cardId}`;
+    setState(s => ({
+      ...s,
+      ccBillAmounts: { ...(s.ccBillAmounts || {}), [key]: amount }
+    }));
+  };
+
   const updateBudget = (newBudget) => {
     setState(s => ({ ...s, budget: newBudget }));
   };
@@ -553,22 +569,20 @@ function App() {
 
   // ===== 主類別管理 =====
   const addCustomCategory = (cat) => {
-    setState(s => {
-      const cs = s.customCategories || [];
-      if (cs.some(c => c.name === cat.name) || CATEGORY_TREE[cat.name]) {
-        alert(`類別「${cat.name}」已存在`);
-        return s;
-      }
-      return {
-        ...s,
-        customCategories: [...cs, {
-          name: cat.name,
-          icon: cat.icon || "📌",
-          color: cat.color || "bg-gray-100 text-gray-700",
-          sub: cat.sub || []
-        }]
-      };
-    });
+    const cs = state.customCategories || [];
+    if (cs.some(c => c.name === cat.name) || CATEGORY_TREE[cat.name]) {
+      alert(`類別「${cat.name}」已存在`);
+      return;
+    }
+    setState(s => ({
+      ...s,
+      customCategories: [...(s.customCategories || []), {
+        name: cat.name,
+        icon: cat.icon || "📌",
+        color: cat.color || "bg-gray-100 text-gray-700",
+        sub: cat.sub || []
+      }]
+    }));
   };
   const updateCustomCategory = (oldName, updates) => {
     setState(s => ({
@@ -597,44 +611,48 @@ function App() {
   // ===== 帳戶類型管理 =====
   const addAccountType = (name, icon) => {
     if (!name) return;
-    setState(s => {
-      const customs = s.customAccountTypes || [];
-      if (BUILTIN_ACCOUNT_TYPES.includes(name) || customs.some(c => c.name === name)) {
-        alert("已有同名類型"); return s;
-      }
-      return { ...s, customAccountTypes: [...customs, { name, icon: icon || "📦" }] };
-    });
+    const customs = state.customAccountTypes || [];
+    if (BUILTIN_ACCOUNT_TYPES.includes(name) || customs.some(c => c.name === name)) {
+      alert("已有同名類型"); return;
+    }
+    setState(s => ({
+      ...s,
+      customAccountTypes: [...(s.customAccountTypes || []), { name, icon: icon || "📦" }]
+    }));
   };
   const updateAccountType = (oldName, newName, newIcon) => {
+    const customs = state.customAccountTypes || [];
+    const i = customs.findIndex(c => c.name === oldName);
+    if (i < 0) return;
+    if (newName !== oldName && (BUILTIN_ACCOUNT_TYPES.includes(newName) || customs.some(c => c.name === newName))) {
+      alert("已有同名類型"); return;
+    }
     setState(s => {
-      const customs = s.customAccountTypes || [];
-      const i = customs.findIndex(c => c.name === oldName);
-      if (i < 0) return s;
-      if (newName !== oldName && (BUILTIN_ACCOUNT_TYPES.includes(newName) || customs.some(c => c.name === newName))) {
-        alert("已有同名類型"); return s;
-      }
-      const nextCustoms = [...customs];
-      nextCustoms[i] = { name: newName, icon: newIcon };
-      // 把用到此類型的帳戶也一起改
+      const nextCustoms = [...(s.customAccountTypes || [])];
+      const idx = nextCustoms.findIndex(c => c.name === oldName);
+      if (idx < 0) return s;
+      nextCustoms[idx] = { name: newName, icon: newIcon };
       const nextAccounts = s.accounts.map(a => a.type === oldName ? { ...a, type: newName } : a);
       return { ...s, customAccountTypes: nextCustoms, accounts: nextAccounts };
     });
   };
   const removeAccountType = (name) => {
-    setState(s => {
-      const customs = s.customAccountTypes || [];
-      const used = s.accounts.some(a => a.type === name);
-      if (used) { alert(`還有帳戶屬於「${name}」,請先刪除或移動後再刪此類型`); return s; }
-      return { ...s, customAccountTypes: customs.filter(c => c.name !== name) };
-    });
+    const used = state.accounts.some(a => a.type === name);
+    if (used) { alert(`還有帳戶屬於「${name}」,請先刪除或移動後再刪此類型`); return; }
+    setState(s => ({
+      ...s,
+      customAccountTypes: (s.customAccountTypes || []).filter(c => c.name !== name)
+    }));
   };
   const toggleHiddenAccountType = (name) => {
+    const used = state.accounts.some(a => a.type === name);
+    const hidden = state.hiddenAccountTypes || [];
+    const isHidden = hidden.includes(name);
+    if (!isHidden && used) { alert(`還有帳戶屬於「${name}」,無法隱藏`); return; }
     setState(s => {
-      const used = s.accounts.some(a => a.type === name);
-      const hidden = s.hiddenAccountTypes || [];
-      const isHidden = hidden.includes(name);
-      if (!isHidden && used) { alert(`還有帳戶屬於「${name}」,無法隱藏`); return s; }
-      const next = isHidden ? hidden.filter(h => h !== name) : [...hidden, name];
+      const h = s.hiddenAccountTypes || [];
+      const ih = h.includes(name);
+      const next = ih ? h.filter(x => x !== name) : [...h, name];
       return { ...s, hiddenAccountTypes: next };
     });
   };
@@ -865,7 +883,7 @@ function App() {
     addAccountType, updateAccountType, removeAccountType, toggleHiddenAccountType, updateBuiltinAccountType,
     addLedger, updateLedger, removeLedger, archiveLedger,
     addLedgerEntry, updateLedgerEntry, removeLedgerEntry,
-    setMonthlyIncome, updateBudget,
+    setMonthlyIncome, setCCBillAmount, updateBudget,
     exportData, exportCSV, importData,
     viewYear, setViewYear, viewMonth, setViewMonth
   };
@@ -1524,8 +1542,10 @@ function CalendarTab({ ctx }) {
   const [typeFilter, setTypeFilter] = useState("全部"); // 全部/支出/收入
   const [showFilter, setShowFilter] = useState(false);
   const [showMonthPicker, setShowMonthPicker] = useState(false);
+  const [accountFilter, setAccountFilter] = useState("全部");
 
   const categories = ["全部", ...Object.keys(getCT())];
+  const accountOptions = ["全部", ...ctx.state.accounts.map(a => a.name)];
 
   const monthTxs = ctx.state.transactions.filter(t => {
     const d = new Date(t.date);
@@ -1533,6 +1553,13 @@ function CalendarTab({ ctx }) {
     if (filterCategory !== "全部" && t.category !== filterCategory) return false;
     if (typeFilter !== "全部" && t.type !== typeFilter) return false;
     if (search && !(t.note || "").includes(search) && !(t.subcategory || "").includes(search)) return false;
+    if (accountFilter !== "全部") {
+      if (t.type === "轉帳") {
+        if (t.fromAccount !== accountFilter && t.toAccount !== accountFilter) return false;
+      } else {
+        if (t.account !== accountFilter) return false;
+      }
+    }
     return true;
   });
 
@@ -1575,7 +1602,7 @@ function CalendarTab({ ctx }) {
     ? monthTxs.filter(t => parseInt(t.date.slice(8, 10)) === selectedDay)
     : [];
 
-  const reset = () => { setSearch(""); setFilterCategory("全部"); setTypeFilter("全部"); };
+  const reset = () => { setSearch(""); setFilterCategory("全部"); setTypeFilter("全部"); setAccountFilter("全部"); };
 
   return (
     <div className="p-4">
@@ -1641,7 +1668,7 @@ function CalendarTab({ ctx }) {
           <button
             onClick={() => setShowFilter(!showFilter)}
             className={`px-3 rounded-lg text-sm ${showFilter ? "bg-blue-500 text-white" : "bg-gray-100 text-gray-700"}`}
-          >篩選{(filterCategory !== "全部" || typeFilter !== "全部") && " •"}</button>
+          >篩選{(filterCategory !== "全部" || typeFilter !== "全部" || accountFilter !== "全部") && " •"}</button>
         </div>
 
         {showFilter && (
@@ -1676,6 +1703,22 @@ function CalendarTab({ ctx }) {
                 ))}
               </div>
             </div>
+            {accountOptions.length > 1 && (
+              <div>
+                <div className="text-xs text-gray-500 mb-1">帳戶</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {accountOptions.map(a => (
+                    <button
+                      key={a}
+                      onClick={() => setAccountFilter(a)}
+                      className={`px-2.5 py-1 rounded-full text-xs whitespace-nowrap transition ${
+                        accountFilter === a ? "bg-indigo-500 text-white" : "bg-white text-gray-700"
+                      }`}
+                    >{a}</button>
+                  ))}
+                </div>
+              </div>
+            )}
             <button onClick={reset} className="w-full py-1.5 bg-white border border-gray-200 rounded text-xs text-gray-600">重設篩選</button>
           </div>
         )}
@@ -1873,7 +1916,8 @@ function CCReviewView({ ctx, year, month, onEdit }) {
   const ym = `${year}-${String(month).padStart(2,"0")}`;
   const creditCards = ctx.state.accounts.filter(a => a.type === "信用卡");
   const [selectedCard, setSelectedCard] = useState("全部");
-  const [expected, setExpected] = useState({}); // 帳單金額(使用者輸入)
+  const getBillAmount = (cardId) => (ctx.state.ccBillAmounts || {})[`${ym}_${cardId}`] || "";
+  const setBillAmount = (cardId, val) => ctx.setCCBillAmount(ym, cardId, val);
 
   // 本月信用卡支出
   const allCCTxs = ctx.state.transactions.filter(t => {
@@ -1960,7 +2004,7 @@ function CCReviewView({ ctx, year, month, onEdit }) {
         const cardTotal = txs.reduce((s, t) => s + t.amount, 0);
         const verifiedTotal = txs.filter(t => t.verified).reduce((s, t) => s + t.amount, 0);
         const unverifiedTotal = cardTotal - verifiedTotal;
-        const expectedAmt = parseFloat(expected[card.id]) || 0;
+        const expectedAmt = parseFloat(getBillAmount(card.id)) || 0;
         const diff = expectedAmt ? expectedAmt - cardTotal : 0;
 
         // 依子分類統計
@@ -1998,8 +2042,8 @@ function CCReviewView({ ctx, year, month, onEdit }) {
                 <input
                   type="number"
                   placeholder="例如 4335"
-                  value={expected[card.id] || ""}
-                  onChange={e => setExpected({ ...expected, [card.id]: e.target.value })}
+                  value={getBillAmount(card.id)}
+                  onChange={e => setBillAmount(card.id, e.target.value)}
                   className="flex-1 p-2 border border-gray-200 rounded text-sm"
                 />
                 {expectedAmt > 0 && (
@@ -4101,6 +4145,83 @@ function FixedExpensesManager({ ctx }) {
   );
 }
 
+
+// ===================== 使用教學資料 =====================
+const TUTORIAL_SECTIONS = [
+  {
+    id: "start", icon: "🚀", title: "1. 快速開始",
+    items: [
+      { q: "第一步：建立帳戶", a: "到「設定 → 帳戶管理」，新增你的帳戶（例：現金、某銀行、信用卡）。每筆交易都需要對應一個帳戶。" },
+      { q: "第二步：設定月收入", a: "到「設定 → 預設月收入」輸入固定薪資。這個數字會在月結頁顯示，幫你計算本月還剩多少可用。" },
+      { q: "第三步：開始記帳", a: "點畫面底部「＋」，選類別、金額、帳戶、日期，就完成一筆記帳了。" },
+      { q: "第四步：查看月結", a: "「月結」頁整合本月收支、信用卡用量、固定支出、儲蓄進度，讓你一眼掌握財務狀況。" },
+    ]
+  },
+  {
+    id: "record", icon: "✏️", title: "2. 記帳功能",
+    items: [
+      { q: "支出 / 收入", a: "點「＋」新增交易，選類型（支出或收入），填金額、類別、帳戶、日期。備註欄可補充說明。" },
+      { q: "轉帳", a: "選「轉帳」類型，指定「從哪個帳戶」轉到「哪個帳戶」，金額填轉出金額。帳戶餘額會自動對應加減。" },
+      { q: "分期付款", a: "記帳時勾選「分期」，填期數（例如 12 期）。App 會自動在未來每個月產生一筆分期記錄，讓你追蹤還剩幾期。" },
+      { q: "自訂類別", a: "到「設定 → 類別管理」可以新增主類別或子類別，或隱藏不需要的類別。" },
+    ]
+  },
+  {
+    id: "account", icon: "🏦", title: "3. 帳戶管理",
+    items: [
+      { q: "帳戶類型", a: "支援：現金、銀行帳戶、信用卡、儲蓄帳戶、貸款、其他。每種類型有對應邏輯。" },
+      { q: "信用卡帳戶", a: "填入額度、出帳日、繳費日，App 會追蹤已刷金額和可用額度，月結頁也會顯示本月刷卡總計。" },
+      { q: "貸款帳戶", a: "建立貸款帳戶時填入本金、利率、期數，App 會自動產生每月還款記錄，不用手動一筆一筆新增。" },
+      { q: "帳戶餘額怎麼算", a: "餘額 = 期初餘額 + 收入 − 支出 ± 轉帳 ± 儲蓄目標提撥。信用卡顯示「已刷 / 額度」。" },
+      { q: "改帳戶名稱", a: "編輯帳戶名稱後，所有相關交易的帳戶欄位會自動同步更新，不需手動修改每筆交易。" },
+    ]
+  },
+  {
+    id: "budget", icon: "📊", title: "4. 月結 & 預算",
+    items: [
+      { q: "月結頁是什麼？", a: "整合本月財務狀況：收支概覽、信用卡刷卡量、每月固定支出清單、儲蓄目標進度。" },
+      { q: "預設月收入", a: "到「設定 → 預設月收入」設定固定薪資。月結頁的「本月可用」從這裡抓。若某月有獎金可在月結頁直接覆蓋。" },
+      { q: "每月可支配預算", a: "設定這個月你「允許自己刷信用卡」的上限。月結頁會顯示：預算 − 已刷 = 還能刷多少。" },
+      { q: "固定支出", a: "到「設定 → 固定支出管理」新增每月固定要付的項目（房租、保險等）。月結頁會列出提醒你先預留。" },
+    ]
+  },
+  {
+    id: "cc", icon: "💳", title: "5. 信用卡核帳",
+    items: [
+      { q: "核帳是什麼？", a: "帳單出來後，把帳單金額輸入 App，與 App 記錄的刷卡金額比對，確認沒有遺漏或多記。" },
+      { q: "怎麼使用？", a: "到「月結 → 信用卡核帳」，選帳單月份，輸入各卡的帳單金額，App 會顯示差額。" },
+      { q: "帳單月份怎麼算？", a: "依據帳戶設定的「出帳日」計算。例如出帳日 25，則 1/25–2/24 的消費屬於 2 月帳單。" },
+      { q: "核帳金額會保存嗎？", a: "輸入後會記住每月每張卡的核帳金額，下次開啟仍在，不用重新輸入。" },
+    ]
+  },
+  {
+    id: "goals", icon: "🎯", title: "6. 儲蓄目標",
+    items: [
+      { q: "建立目標", a: "到「月結 → 儲蓄目標」新增目標（例：旅遊基金 $20,000），設定目標金額。" },
+      { q: "記錄存款進度", a: "每次存錢時，到目標頁點「存入」填金額，App 會累計並顯示進度條。" },
+      { q: "目標怎麼顯示？", a: "月結頁和目標頁都有進度條：已存 / 目標金額，讓你知道距離目標還差多少。" },
+    ]
+  },
+  {
+    id: "installments", icon: "🔄", title: "7. 分期追蹤",
+    items: [
+      { q: "怎麼記分期？", a: "記帳時勾選「分期」，填總期數（例如 12 期）。App 自動計算每期金額，並在往後每個月各建立一筆記錄。" },
+      { q: "在哪裡查看分期？", a: "月結頁下方「進行中的分期」顯示每筆分期的名稱、已繳期數 / 總期數、本月金額。" },
+      { q: "分期和固定支出的差異", a: "分期有期限（繳完就結束），固定支出是持續的（房租、訂閱）。月結頁兩者都會顯示。" },
+    ]
+  },
+  {
+    id: "ledger", icon: "📒", title: "8. 帳本 & 快照",
+    items: [
+      { q: "帳本是什麼？", a: "獨立紀錄本，適合追蹤特定項目（例：水電帳本記每月度數、家庭補貼帳本）。和主帳戶交易分開。" },
+      { q: "帳本類型", a: "收支帳本（一般收支）、水電帳本（有同期比較分析）、通用紀錄（每月一筆，如補助、房租收入）。" },
+      { q: "帳本快照", a: "到帳本詳細頁點「分享」，生成該帳本的摘要快照圖，可截圖或傳給家人對帳。" },
+      { q: "主帳本快照", a: "到「設定 → 快照報表」，生成含帳戶餘額、信用卡、儲蓄目標、最近交易的完整財務快照。" },
+      { q: "資料備份", a: "到「設定 → 資料備份」定期匯出 JSON（可完整還原資料），或 CSV（可用 Excel 開啟分析）。建議每月備份一次。" },
+    ]
+  },
+];
+
 // ===================== 設定頁 =====================
 function SettingsTab({ ctx }) {
   const [editIncome, setEditIncome] = useState(false);
@@ -4108,6 +4229,7 @@ function SettingsTab({ ctx }) {
   const [editBudget, setEditBudget] = useState(false);
   const [monthlyBudget, setMonthlyBudget] = useState(ctx.state.budget.monthlyBudget || "");
   const [showSnapshot, setShowSnapshot] = useState(false);
+  const [tutorialOpen, setTutorialOpen] = useState(null);
   const fileRef = useRef();
 
   const saveIncome = () => {
@@ -4233,7 +4355,6 @@ function SettingsTab({ ctx }) {
             if (confirm("確定清除所有資料?\n\n會清掉:交易、帳戶、帳本、固定支出、儲蓄目標、預算、月收入、類別、帳戶類型等全部設定,回到完全空白狀態,讓你從零開始打造自己的帳本。\n\n此動作無法復原!")) {
               const emptyState = {
                 transactions: [],
-                installments: [],
                 goals: [],
                 accounts: [],
                 stocks: [],
@@ -4248,7 +4369,8 @@ function SettingsTab({ ctx }) {
                 hiddenAccountTypes: [],
                 builtinTypeOverrides: {},
                 ledgers: [],
-                ledgerEntries: []
+                ledgerEntries: [],
+                ccBillAmounts: {}
               };
               localStorage.setItem(LS_KEY, JSON.stringify(emptyState));
               location.reload();
@@ -4263,6 +4385,33 @@ function SettingsTab({ ctx }) {
         <div>交易筆數:{ctx.state.transactions.length}</div>
         <div>儲蓄目標:{ctx.state.goals.length} 個</div>
         <div>帳戶數:{ctx.state.accounts.length}</div>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow-sm p-4 mb-4">
+        <h3 className="font-semibold mb-3">📚 使用教學</h3>
+        <div className="space-y-2">
+          {TUTORIAL_SECTIONS.map(sec => (
+            <div key={sec.id} className="border border-gray-100 rounded-xl overflow-hidden">
+              <button
+                onClick={() => setTutorialOpen(tutorialOpen === sec.id ? null : sec.id)}
+                className="w-full flex justify-between items-center px-3 py-3 text-left bg-gray-50 hover:bg-gray-100 transition"
+              >
+                <span className="font-medium text-gray-800 text-sm">{sec.icon} {sec.title}</span>
+                <span className="text-gray-400 text-xs ml-2">{tutorialOpen === sec.id ? "▲" : "▼"}</span>
+              </button>
+              {tutorialOpen === sec.id && (
+                <div className="px-3 pb-3 pt-2 space-y-2">
+                  {sec.items.map((item, i) => (
+                    <div key={i} className="bg-blue-50 rounded-lg p-3">
+                      <div className="font-semibold text-blue-800 text-xs mb-1">🔹 {item.q}</div>
+                      <div className="text-gray-600 text-xs leading-relaxed">{item.a}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
 
       {showSnapshot && <SnapshotReport ctx={ctx} onClose={() => setShowSnapshot(false)} />}
@@ -5267,9 +5416,7 @@ function SnapshotReport({ ctx, onClose }) {
   const timestamp = `${now.getFullYear()}/${pad(now.getMonth()+1)}/${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
   const fileStamp = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
 
-  // 收件信箱(預設妳的 Gmail,第一次會記住設定過的)
-  const defaultEmail = "joycehsu9146@gmail.com";
-  const savedEmail = (typeof localStorage !== "undefined" && localStorage.getItem("snapshot-email")) || defaultEmail;
+  const savedEmail = (typeof localStorage !== "undefined" && localStorage.getItem("snapshot-email")) || "";
 
   const captureCanvas = async () => {
     const el = document.getElementById("snapshot-content");
