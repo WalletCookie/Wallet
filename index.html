@@ -1918,47 +1918,110 @@ function CCReviewView({ ctx, year, month, onEdit }) {
   const getBillAmount = (cardId) => (ctx.state.ccBillAmounts || {})[`${ym}_${cardId}`] || "";
   const setBillAmount = (cardId, val) => ctx.setCCBillAmount(ym, cardId, val);
 
-  // 本月信用卡支出
-  const allCCTxs = ctx.state.transactions.filter(t => {
-    if (t.type !== "支出") return false;
-    if (!t.date.startsWith(ym)) return false;
-    return creditCards.some(c => c.name === t.account);
-  });
+  // ── 帳單區間計算 ────────────────────────────────────────────
+  // 回傳 { start: Date, end: Date }，start 是不含端點、end 是含端點
+  const getBillingPeriod = (card) => {
+    if (!card.statementDay) {
+      // 無出帳日 → 用日曆月
+      const start = new Date(year, month - 1, 0); // 上月底（不含）
+      const end   = new Date(year, month - 1, new Date(year, month, 0).getDate());
+      return { start, end };
+    }
+    const sd = parseInt(card.statementDay);
+    // 本期 end = 本月 sd 號；start = 上月 sd 號（不含）
+    const end   = new Date(year, month - 1, sd);
+    const start = new Date(year, month - 2, sd); // 不含，>start
+    return { start, end };
+  };
 
-  // 依卡分組
-  const byCard = {};
-  creditCards.forEach(c => { byCard[c.name] = []; });
-  allCCTxs.forEach(t => {
-    if (!byCard[t.account]) byCard[t.account] = [];
-    byCard[t.account].push(t);
-  });
+  const inPeriod = (dateStr, start, end) => {
+    const d = new Date(dateStr);
+    return d > start && d <= end;
+  };
 
-  const displayCards = selectedCard === "全部" ? creditCards : creditCards.filter(c => c.name === selectedCard);
+  // 計算距今天數（用於繳費提醒）
+  const today = new Date();
+  today.setHours(0,0,0,0);
 
+  // ── 繳費提醒 ────────────────────────────────────────────────
+  const dueReminders = creditCards.filter(c => c.dueDay).map(c => {
+    const dueDate = new Date(year, month - 1, parseInt(c.dueDay));
+    const diffDays = Math.round((dueDate - today) / 86400000);
+    const { start, end } = getBillingPeriod(c);
+    const cardTxs = ctx.state.transactions.filter(t =>
+      t.type === "支出" && t.account === c.name && !t.deferred && inPeriod(t.date, start, end)
+    );
+    const amt = cardTxs.reduce((s, t) => s + t.amount, 0);
+    return { ...c, diffDays, dueDate, amt };
+  }).filter(c => c.diffDays >= 0 && c.diffDays <= 7);
+
+  // ── 取得各卡交易（依帳單區間）───────────────────────────────
+  const getCardTxs = (card) => {
+    const { start, end } = getBillingPeriod(card);
+    // 上一期區間（用於找延後進來的）
+    const prevEnd = start; // start = 上期 end（不含）
+    const prevStart = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
+
+    const normal   = ctx.state.transactions.filter(t =>
+      t.type === "支出" && t.account === card.name &&
+      !t.deferred && inPeriod(t.date, start, end)
+    );
+    const deferredIn = ctx.state.transactions.filter(t =>
+      t.type === "支出" && t.account === card.name &&
+      t.deferred && inPeriod(t.date, prevStart, prevEnd)
+    );
+    return { normal, deferredIn, all: [...deferredIn, ...normal] };
+  };
+
+  const toggleDefer = (txId) => {
+    const t = ctx.state.transactions.find(x => x.id === txId);
+    ctx.updateTransaction(txId, { deferred: !t.deferred });
+  };
   const toggleVerified = (txId) => {
     const t = ctx.state.transactions.find(x => x.id === txId);
     ctx.updateTransaction(txId, { verified: !t.verified });
   };
-
-  const markAllVerified = (cardName, value) => {
-    byCard[cardName].forEach(t => {
-      ctx.updateTransaction(t.id, { verified: value });
-    });
+  const markAllVerified = (txList, value) => {
+    txList.forEach(t => ctx.updateTransaction(t.id, { verified: value }));
   };
 
-  // 整月統計
-  const grandTotal = allCCTxs.reduce((s, t) => s + t.amount, 0);
-  const grandVerified = allCCTxs.filter(t => t.verified).reduce((s, t) => s + t.amount, 0);
+  const displayCards = selectedCard === "全部" ? creditCards : creditCards.filter(c => c.name === selectedCard);
+
+  // 整體統計（所有卡本期）
+  const allTxs = creditCards.flatMap(c => getCardTxs(c).all);
+  const grandTotal    = allTxs.reduce((s, t) => s + t.amount, 0);
+  const grandVerified = allTxs.filter(t => t.verified).reduce((s, t) => s + t.amount, 0);
 
   return (
     <>
+      {/* 繳費提醒 */}
+      {dueReminders.length > 0 && (
+        <div className="mb-4 space-y-2">
+          {dueReminders.map(c => (
+            <div key={c.id} className={`rounded-xl p-3 flex items-center gap-3 ${c.diffDays <= 3 ? "bg-red-50 border border-red-200" : "bg-yellow-50 border border-yellow-200"}`}>
+              <div className="text-xl">{c.diffDays <= 3 ? "🚨" : "⚠️"}</div>
+              <div className="flex-1">
+                <div className="font-semibold text-sm text-gray-800">{c.name}</div>
+                <div className="text-xs text-gray-600">
+                  繳費日 {month}/{c.dueDay}，還有 <span className={`font-bold ${c.diffDays <= 3 ? "text-red-600" : "text-yellow-700"}`}>{c.diffDays} 天</span>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-xs text-gray-500">本期應繳</div>
+                <div className="font-bold text-red-500 text-sm">{fmtMoney(c.amt)}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* 整月總計 */}
       <div className="bg-gradient-to-br from-purple-50 to-pink-50 rounded-2xl shadow-sm p-4 mb-4">
         <div className="text-sm text-gray-600 mb-2">💳 {year}/{month} 信用卡總計</div>
         <div className="grid grid-cols-3 gap-2">
           <div className="bg-white rounded-lg p-2 text-center">
             <div className="text-[10px] text-gray-500">筆數</div>
-            <div className="font-bold text-purple-600">{allCCTxs.length}</div>
+            <div className="font-bold text-purple-600">{allTxs.length}</div>
           </div>
           <div className="bg-white rounded-lg p-2 text-center">
             <div className="text-[10px] text-gray-500">總金額</div>
@@ -1974,19 +2037,12 @@ function CCReviewView({ ctx, year, month, onEdit }) {
       {/* 卡別切換 */}
       {creditCards.length > 1 && (
         <div className="flex gap-1.5 overflow-x-auto no-scrollbar mb-3 pb-1">
-          <button
-            onClick={() => setSelectedCard("全部")}
-            className={`px-3 py-1.5 rounded-full text-xs whitespace-nowrap ${
-              selectedCard === "全部" ? "bg-purple-500 text-white" : "bg-gray-100 text-gray-700"
-            }`}
+          <button onClick={() => setSelectedCard("全部")}
+            className={`px-3 py-1.5 rounded-full text-xs whitespace-nowrap ${selectedCard === "全部" ? "bg-purple-500 text-white" : "bg-gray-100 text-gray-700"}`}
           >全部</button>
           {creditCards.map(c => (
-            <button
-              key={c.id}
-              onClick={() => setSelectedCard(c.name)}
-              className={`px-3 py-1.5 rounded-full text-xs whitespace-nowrap ${
-                selectedCard === c.name ? "bg-purple-500 text-white" : "bg-gray-100 text-gray-700"
-              }`}
+            <button key={c.id} onClick={() => setSelectedCard(c.name)}
+              className={`px-3 py-1.5 rounded-full text-xs whitespace-nowrap ${selectedCard === c.name ? "bg-purple-500 text-white" : "bg-gray-100 text-gray-700"}`}
             >{c.name}{c.last4 ? ` (${c.last4})` : ""}</button>
           ))}
         </div>
@@ -1999,20 +2055,27 @@ function CCReviewView({ ctx, year, month, onEdit }) {
       )}
 
       {displayCards.map(card => {
-        const txs = byCard[card.name] || [];
-        const cardTotal = txs.reduce((s, t) => s + t.amount, 0);
-        const verifiedTotal = txs.filter(t => t.verified).reduce((s, t) => s + t.amount, 0);
+        const { start, end } = getBillingPeriod(card);
+        const { normal, deferredIn, all: txs } = getCardTxs(card);
+        const cardTotal    = txs.reduce((s, t) => s + t.amount, 0);
+        const verifiedTotal   = txs.filter(t => t.verified).reduce((s, t) => s + t.amount, 0);
         const unverifiedTotal = cardTotal - verifiedTotal;
         const expectedAmt = parseFloat(getBillAmount(card.id)) || 0;
         const diff = expectedAmt ? expectedAmt - cardTotal : 0;
+        const fmt = d => `${d.getMonth()+1}/${d.getDate()}`;
 
-        // 依子分類統計
+        // 本期已延後到下期的（顯示在底部灰色區）
+        const deferredOut = ctx.state.transactions.filter(t =>
+          t.type === "支出" && t.account === card.name &&
+          t.deferred && inPeriod(t.date, start, end)
+        );
+
+        // 依類別統計
         const byCat = {};
         txs.forEach(t => {
-          const key = t.category;
-          if (!byCat[key]) byCat[key] = { count: 0, total: 0 };
-          byCat[key].count++;
-          byCat[key].total += t.amount;
+          if (!byCat[t.category]) byCat[t.category] = { count: 0, total: 0 };
+          byCat[t.category].count++;
+          byCat[t.category].total += t.amount;
         });
         const catEntries = Object.entries(byCat).sort((a,b) => b[1].total - a[1].total);
 
@@ -2024,36 +2087,39 @@ function CCReviewView({ ctx, year, month, onEdit }) {
                 <div className="font-bold text-gray-800">💳 {card.name}</div>
                 <div className="text-[11px] text-gray-500">
                   {card.last4 && `末4碼 ${card.last4}`}
-                  {card.statementDay && ` · 結帳 ${card.statementDay} 號`}
-                  {card.dueDay && ` · 繳費 ${card.dueDay} 號`}
+                  {card.statementDay
+                    ? <span className="text-blue-500"> · 帳單 {fmt(start)} – {fmt(end)}</span>
+                    : card.statementDay === "" ? null : null
+                  }
+                  {card.dueDay && ` · 繳費 ${month}/${card.dueDay}`}
                 </div>
               </div>
               <div className="text-right">
-                <div className="text-[10px] text-gray-500">本月已用</div>
+                <div className="text-[10px] text-gray-500">本期已用</div>
                 <div className="font-bold text-red-500">{fmtMoney(cardTotal)}</div>
               </div>
             </div>
 
             {/* 核對輸入 */}
             <div className="bg-yellow-50 rounded-lg p-2.5 mb-3">
-              <div className="text-xs text-gray-600 mb-1">📄 實際帳單金額(輸入後自動比對)</div>
+              <div className="text-xs text-gray-600 mb-1">📄 實際帳單金額（輸入後自動比對）</div>
               <div className="flex items-center gap-2">
                 <input
                   type="number"
                   placeholder="例如 4335"
                   value={getBillAmount(card.id)}
                   onChange={e => setBillAmount(card.id, e.target.value)}
-                  className="flex-1 p-2 border border-gray-200 rounded text-sm"
+                  className="flex-1 min-w-0 p-2 border border-gray-200 rounded text-sm"
                 />
                 {expectedAmt > 0 && (
-                  <div className={`text-sm font-semibold ${Math.abs(diff) < 1 ? "text-green-600" : "text-red-500"}`}>
+                  <div className={`flex-shrink-0 text-sm font-semibold ${Math.abs(diff) < 1 ? "text-green-600" : "text-red-500"}`}>
                     {Math.abs(diff) < 1 ? "✓ 吻合" : `差 ${fmtMoney(diff)}`}
                   </div>
                 )}
               </div>
             </div>
 
-            {/* 子統計 */}
+            {/* 類別統計 */}
             {catEntries.length > 0 && (
               <div className="mb-3">
                 <div className="text-xs text-gray-500 mb-1.5">📊 本卡消費分類</div>
@@ -2067,7 +2133,7 @@ function CCReviewView({ ctx, year, month, onEdit }) {
               </div>
             )}
 
-            {/* 全選按鈕 */}
+            {/* 核對進度 */}
             {txs.length > 0 && (
               <div className="flex justify-between items-center mb-2">
                 <div className="text-xs text-gray-500">
@@ -2075,47 +2141,41 @@ function CCReviewView({ ctx, year, month, onEdit }) {
                   {unverifiedTotal > 0 && <span className="text-orange-500"> · 待核 {fmtMoney(unverifiedTotal)}</span>}
                 </div>
                 <div className="flex gap-1">
-                  <button
-                    onClick={() => markAllVerified(card.name, true)}
-                    className="px-2 py-0.5 text-[11px] bg-green-100 text-green-600 rounded"
-                  >全核對</button>
-                  <button
-                    onClick={() => markAllVerified(card.name, false)}
-                    className="px-2 py-0.5 text-[11px] bg-gray-100 text-gray-600 rounded"
-                  >全清除</button>
+                  <button onClick={() => markAllVerified(txs, true)}
+                    className="px-2 py-0.5 text-[11px] bg-green-100 text-green-600 rounded">全核對</button>
+                  <button onClick={() => markAllVerified(txs, false)}
+                    className="px-2 py-0.5 text-[11px] bg-gray-100 text-gray-600 rounded">全清除</button>
                 </div>
               </div>
             )}
 
-            {/* 明細 */}
+            {/* 延後入帳（從上期延後進來）*/}
+            {deferredIn.length > 0 && (
+              <div className="mb-2">
+                <div className="text-xs text-indigo-500 font-medium mb-1">↩️ 從上期延後入帳</div>
+                {deferredIn.sort((a,b) => a.date.localeCompare(b.date)).map(t => (
+                  <TxRowCC key={t.id} t={t} onEdit={onEdit} onVerify={() => toggleVerified(t.id)} onDefer={() => toggleDefer(t.id)} isDeferredIn />
+                ))}
+              </div>
+            )}
+
+            {/* 本期明細 */}
             {txs.length === 0 ? (
-              <div className="text-center text-gray-400 py-4 text-xs">本月這張卡沒有支出</div>
+              <div className="text-center text-gray-400 py-4 text-xs">本期這張卡沒有支出</div>
             ) : (
               <div className="space-y-1">
-                {txs.sort((a,b) => a.date.localeCompare(b.date)).map(t => (
-                  <div key={t.id} className={`flex items-center gap-2 p-2 rounded-lg ${t.verified ? "bg-green-50" : "hover:bg-gray-50"}`}>
-                    <button
-                      onClick={() => toggleVerified(t.id)}
-                      className={`w-5 h-5 rounded border-2 flex items-center justify-center text-xs flex-shrink-0 ${
-                        t.verified ? "bg-green-500 border-green-500 text-white" : "bg-white border-gray-300"
-                      }`}
-                    >{t.verified ? "✓" : ""}</button>
-                    <button
-                      onClick={() => onEdit(t)}
-                      className="flex-1 min-w-0 text-left"
-                    >
-                      <div className="text-sm font-medium truncate">
-                        {getCT(t.category)?.icon} {t.note || t.subcategory || t.category}
-                      </div>
-                      <div className="text-[11px] text-gray-500 truncate">
-                        {t.date.slice(5)} · {t.category}{t.subcategory ? "/"+t.subcategory : ""}
-                        {t.installmentGroupId && <span className="ml-1 bg-yellow-100 text-yellow-700 px-1 rounded text-[10px]">分期</span>}
-                      </div>
-                    </button>
-                    <div className="font-bold text-sm text-red-500 flex-shrink-0">
-                      -{fmtMoney(t.amount)}
-                    </div>
-                  </div>
+                {normal.sort((a,b) => a.date.localeCompare(b.date)).map(t => (
+                  <TxRowCC key={t.id} t={t} onEdit={onEdit} onVerify={() => toggleVerified(t.id)} onDefer={() => toggleDefer(t.id)} />
+                ))}
+              </div>
+            )}
+
+            {/* 已延後到下期 */}
+            {deferredOut.length > 0 && (
+              <div className="mt-3 pt-3 border-t border-dashed border-gray-200">
+                <div className="text-xs text-gray-400 font-medium mb-1">⏭ 已延後至下期</div>
+                {deferredOut.sort((a,b) => a.date.localeCompare(b.date)).map(t => (
+                  <TxRowCC key={t.id} t={t} onEdit={onEdit} onVerify={() => toggleVerified(t.id)} onDefer={() => toggleDefer(t.id)} isDeferred grayed />
                 ))}
               </div>
             )}
@@ -2123,6 +2183,34 @@ function CCReviewView({ ctx, year, month, onEdit }) {
         );
       })}
     </>
+  );
+}
+
+function TxRowCC({ t, onEdit, onVerify, onDefer, isDeferredIn, isDeferred, grayed }) {
+  const [showDefer, setShowDefer] = useState(false);
+  return (
+    <div className={`flex items-center gap-2 p-2 rounded-lg mb-1 ${grayed ? "bg-gray-50 opacity-60" : t.verified ? "bg-green-50" : "hover:bg-gray-50"}`}>
+      <button onClick={onVerify}
+        className={`w-5 h-5 rounded border-2 flex items-center justify-center text-xs flex-shrink-0 ${
+          t.verified ? "bg-green-500 border-green-500 text-white" : "bg-white border-gray-300"
+        }`}>{t.verified ? "✓" : ""}</button>
+      <button onClick={() => onEdit(t)} className="flex-1 min-w-0 text-left">
+        <div className="text-sm font-medium truncate">
+          {getCT(t.category)?.icon} {t.note || t.subcategory || t.category}
+          {isDeferredIn && <span className="ml-1 text-[10px] text-indigo-400">↩延入</span>}
+        </div>
+        <div className="text-[11px] text-gray-500 truncate">
+          {t.date.slice(5)} · {t.category}{t.subcategory ? "/"+t.subcategory : ""}
+          {t.installmentGroupId && <span className="ml-1 bg-yellow-100 text-yellow-700 px-1 rounded text-[10px]">分期</span>}
+        </div>
+      </button>
+      <div className="font-bold text-sm text-red-500 flex-shrink-0">-{fmtMoney(t.amount)}</div>
+      <button
+        onClick={onDefer}
+        className={`flex-shrink-0 text-[11px] px-2 py-1 rounded-full border ${isDeferred ? "text-green-600 border-green-300 bg-green-50" : "text-gray-400 border-gray-200"}`}
+        title={isDeferred ? "歸回本期" : "延後入帳"}
+      >{isDeferred ? "↩" : "⏭"}</button>
+    </div>
   );
 }
 
